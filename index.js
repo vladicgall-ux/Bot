@@ -168,7 +168,7 @@ bot.catch((err, ctx) => {
 
 bot.start((ctx) => {
   ctx.reply(
-    `🤖 *Бот серфинга в Яндексе (Mobile Anti-Capcha)*\n\n` +
+    `🤖 *Бот серфинга в Яндексе (Anti-Capcha v2)*\n\n` +
     `• Отправьте текст фразы или используйте /setquery N\n` +
     `• /run — старт, /stop_run — стоп\n` +
     `• Управление IP: /changeip\n` +
@@ -221,8 +221,9 @@ async function runSurf(query, stopSet, ctx) {
   
   let results = [];
   try {
-    results = await searchYandexMobileHttp(query, searchProxy, ctx);
+    results = await searchYandexMobilePlaywright(query, searchProxy, ctx);
   } catch (err) {
+    console.error('[runSurf] Search error:', err.message);
     await changeProxyIP();
     throw err;
   }
@@ -272,89 +273,109 @@ async function runSurf(query, stopSet, ctx) {
   ].join('\n');
 }
 
-// Поиск через мобильный m.yandex.ru с прогревом кук и задержками
-async function searchYandexMobileHttp(query, proxy, ctx) {
-  let proxyUrlWithAuth = proxy.server;
-  if (proxy.username && proxy.password) {
-    const urlObj = new URL(proxy.server);
-    urlObj.username = proxy.username;
-    urlObj.password = proxy.password;
-    proxyUrlWithAuth = urlObj.toString();
-  }
-  const agent = new HttpsProxyAgent(proxyUrlWithAuth);
-
-  const mobileUAs = [
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
-    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
-  ];
-  const selectedUA = mobileUAs[Math.floor(Math.random() * mobileUAs.length)];
-
-  const headers = {
-    'User-Agent': selectedUA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-  };
-
-  // Шаг 1: Заходим на главную m.yandex.ru для получения кук
-  let cookies = '';
+// ============================================================================
+// ГЛАВНОЕ УЛУЧШЕНИЕ: Использование Playwright вместо node-fetch
+// Playwright использует настоящий браузер Chrome, который:
+// - Не определяется как бот
+// - Имеет все необходимые заголовки
+// - Может выполнять JavaScript
+// - Может обходить простые проверки капчи
+// ============================================================================
+async function searchYandexMobilePlaywright(query, proxy, ctx) {
+  let session;
   try {
-    const homeRes = await fetch('https://m.yandex.ru/', { agent, headers, timeout: 15000 });
-    const setCookieHeader = homeRes.headers.raw()['set-cookie'];
-    if (setCookieHeader) {
-      cookies = setCookieHeader.map(c => c.split(';')[0]).join('; ');
+    // Запускаем браузер с прокси для поиска
+    session = await launchSession(proxy);
+    const page = session.page;
+    
+    // Прогрев: заходим на главную m.yandex.ru
+    console.log('[Yandex] Прогрев сессии на главной...');
+    await page.goto('https://m.yandex.ru/', { 
+      waitUntil: 'networkidle2', 
+      timeout: 45000 
+    });
+    
+    // Человеческая пауза (смотрим на главную 2-5 сек)
+    await sleep(2000 + Math.random() * 3000);
+
+    // Выполняем поиск
+    console.log(`[Yandex] Выполняю поиск: "${query}"`);
+    const searchUrl = `https://m.yandex.ru/search/?text=${encodeURIComponent(query)}`;
+    
+    await page.goto(searchUrl, { 
+      waitUntil: 'networkidle2', 
+      timeout: 45000 
+    });
+
+    // Ждем полную загрузку результатов поиска
+    await sleep(1500 + Math.random() * 1500);
+
+    // Проверяем наличие капчи перед парсингом
+    const pageText = await page.content().catch(() => '');
+    
+    if (pageText.includes('smartcaptcha') || pageText.includes('Captcha') || pageText.includes('подтвердите')) {
+      if (ctx && ctx.reply) await ctx.reply('🛑 Яндекс затребовал SmartCaptcha. Меняю IP...');
+      throw new Error('SmartCaptcha detected');
     }
-  } catch (e) {
-    console.warn('[Warmup] Ошибка:', e.message);
-  }
 
-  // Человеческая пауза на чтение главной (3-6 секунд)
-  await sleep(3000 + Math.random() * 3000);
+    // Парсим результаты поиска
+    const html = await page.content();
+    const $ = cheerio.load(html);
+    const items = [];
 
-  // Шаг 2: Поисковый запрос
-  const searchUrl = `https://m.yandex.ru/search/?text=${encodeURIComponent(query)}`;
-  const searchHeaders = { 
-    ...headers, 
-    'Referer': 'https://m.yandex.ru/' 
-  };
-  if (cookies) searchHeaders['Cookie'] = cookies;
+    // Ищем все ссылки в результатах поиска (мобильная версия)
+    $('a[href^="http"]').each((_, el) => {
+      const href = $(el).attr('href');
+      const title = $(el).text().trim();
+      
+      // Фильтруем только релевантные результаты (не сам Яндекс)
+      if (href && 
+          !href.includes('yandex.ru') && 
+          !href.includes('ya.ru') &&
+          !href.includes('turbo.yandex') &&
+          !href.includes('ads.') &&
+          href.startsWith('http')) {
+        // Проверяем, нет ли уже такого URL
+        if (!items.some(i => i.url === href)) {
+          items.push({ url: href, title: title || href });
+        }
+      }
+    });
 
-  const response = await fetch(searchUrl, {
-    agent: agent,
-    headers: searchHeaders,
-    timeout: 30000,
-  });
+    console.log(`[Yandex] Найдено результатов: ${items.length}`);
+    return items.slice(0, 10); // Возвращаем максимум 10 результатов
 
-  const html = await response.text();
-
-  if (html.includes('Captcha') || html.includes('подтвердите') || html.includes('smartcaptcha')) {
-    if (ctx && ctx.reply) await ctx.reply('🛑 Мобильный Яндекс затребовал капчу.');
-    throw new Error('Captcha detected');
-  }
-
-  const $ = cheerio.load(html);
-  const items = [];
-
-  $('div.serp-item, .card, article, div[data-fast-name]').each((_, node) => {
-    const link = $(node).find('a[href^="http"]').first();
-    const href = link.attr('href');
-    const title = $(node).find('h2, .organic__title, .Path').text().trim();
-
-    if (href && !href.includes('yandex.ru') && !href.includes('ya.ru') && href.startsWith('http')) {
-      items.push({ url: href, title: title || href });
+  } catch (err) {
+    console.error('[searchYandexMobilePlaywright]', err.message);
+    if (ctx && ctx.reply) {
+      await ctx.reply(`⚠️ Ошибка поиска: ${err.message.slice(0, 100)}`).catch(() => {});
     }
-  });
-
-  const seen = new Set();
-  return items.filter((i) => !seen.has(i.url) && seen.add(i.url)).slice(0, 10);
+    throw err;
+  } finally {
+    if (session?.browser) {
+      await session.browser.close().catch(() => {});
+    }
+  }
 }
 
 async function launchSession(proxy) {
+  const proxyConfig = proxy ? {
+    server: proxy.server,
+    username: proxy.username,
+    password: proxy.password,
+  } : undefined;
+
   const browser = await chromium.launch({
     headless: true,
-    proxy: proxy || undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    proxy: proxyConfig,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-web-resources',
+    ],
   });
 
   const device = devices['Pixel 7'];
@@ -362,9 +383,28 @@ async function launchSession(proxy) {
     ...device,
     locale: 'ru-RU',
     timezoneId: 'Asia/Yekaterinburg',
+    bypassCSP: true,
+  });
+
+  // Удаляем признаки автоматизации
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => false,
+    });
+    // Маскируем plugins
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [1, 2, 3, 4, 5],
+    });
   });
 
   const page = await context.newPage();
+  
+  // Дополнительные headers для реалистичности
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+  });
+
   return { browser, context, page };
 }
 
@@ -386,7 +426,7 @@ async function visitSite(page, url) {
   return 'просмотр';
 }
 
-bot.launch().then(() => console.log('✅ Бот запущен (Mobile Anti-Capcha режим)'));
+bot.launch().then(() => console.log('✅ Бот запущен (Anti-Capcha v2 - Playwright режим)'));
 
 process.once('SIGINT', () => { stopScheduler(); bot.stop('SIGINT'); });
 process.once('SIGTERM', () => { stopScheduler(); bot.stop('SIGTERM'); });
