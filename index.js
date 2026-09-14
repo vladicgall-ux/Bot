@@ -15,8 +15,32 @@ if (!BOT_TOKEN) {
 
 const PROXY_ROTATE_URL = process.env.PROXY_ROTATE_URL || 'https://api.lteboost.com/rotate?key=ltb_ssjgP4Ie9hTF2Ow1UO_bua_xryrF7Zrorf1WpfDH0Eg';
 
+// Читаем переменные прокси из окружения
+const PROXY_SERVER = process.env.PROXY_SERVER;
+const PROXY_USER = process.env.PROXY_USER;
+const PROXY_PASS = process.env.PROXY_PASS;
+
+function getProxyFromEnv() {
+  if (PROXY_SERVER && PROXY_USER && PROXY_PASS) {
+    return {
+      server: PROXY_SERVER,
+      username: PROXY_USER,
+      password: PROXY_PASS,
+    };
+  }
+  return null;
+}
+
 function parseProxyList() {
   const list = [];
+  
+  // Сначала проверяем переменные окружения PROXY_SERVER, PROXY_USER, PROXY_PASS
+  const envProxy = getProxyFromEnv();
+  if (envProxy) {
+    list.push(envProxy);
+  }
+  
+  // Потом проверяем PROXY_LIST (старый формат)
   if (process.env.PROXY_LIST) {
     const lines = process.env.PROXY_LIST.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
     for (const line of lines) {
@@ -37,6 +61,7 @@ function parseProxyList() {
     }
   }
   
+  // Если ничего не найдено, используем дефолтный прокси
   if (!list.length) {
     list.push({
       server: 'http://mob.lteboost.com:3000',
@@ -49,6 +74,7 @@ function parseProxyList() {
 
 const PROXIES = parseProxyList();
 console.log(`[init] Прокси: ${PROXIES.length}`);
+console.log(`[init] PROXY_SERVER из .env: ${PROXY_SERVER || 'не установлен'}`);
 
 function randomProxy(exclude = null) {
   if (!PROXIES.length) return null;
@@ -186,15 +212,19 @@ bot.command('testproxy', async (ctx) => {
   const proxy = PROXIES[0];
   
   try {
-    const proxyUrlWithAuth = proxy.username && proxy.password 
-      ? `http://${proxy.username}:${proxy.password}@${proxy.server.replace('http://', '')}`
-      : proxy.server;
-    const agent = new HttpsProxyAgent(proxyUrlWithAuth);
+    // Формируем URL прокси
+    let proxyUrl = proxy.server;
+    if (proxy.username && proxy.password) {
+      const urlObj = new URL(proxy.server);
+      proxyUrl = `http://${proxy.username}:${proxy.password}@${urlObj.hostname}:${urlObj.port || 80}`;
+    }
+    
+    const agent = new HttpsProxyAgent(proxyUrl);
     const res = await fetch('https://api.ipify.org?format=json', { agent, timeout: 10000 });
     const data = await res.json();
-    await ctx.reply(`✅ Прокси работает!\n📍 IP: ${data.ip}`);
+    await ctx.reply(`✅ Прокси работает!\n📍 IP: ${data.ip}\n🔗 Сервер: ${proxy.server}`);
   } catch (e) {
-    await ctx.reply(`❌ Ошибка прокси: ${e.message}`);
+    await ctx.reply(`❌ Ошибка прокси: ${e.message}\n🔗 Сервер: ${proxy.server}`);
   }
 });
 
@@ -293,8 +323,8 @@ async function runSurf(query, stopSet, ctx) {
 }
 
 // ============================================================================
-// ПОИСК ТОЛЬКО С ПРОКСИ (без fallback на прямое соединение)
-// Если прокси не работает - возвращаем ошибку
+// ПОИСК ТОЛЬКО С ПРОКСИ
+// Поддерживает переменные окружения: PROXY_SERVER, PROXY_USER, PROXY_PASS
 // ============================================================================
 async function searchYandexMobilePlaywright(query, proxy, ctx) {
   let session;
@@ -374,11 +404,18 @@ async function launchSession(proxy) {
     throw new Error('Прокси требуется! Используйте /testproxy для проверки.');
   }
 
+  // Используем переменные окружения PROXY_SERVER, PROXY_USER, PROXY_PASS если они установлены
+  const server = PROXY_SERVER || proxy.server;
+  const username = PROXY_USER || proxy.username;
+  const password = PROXY_PASS || proxy.password;
+
   const proxyConfig = {
-    server: proxy.server,
-    username: proxy.username,
-    password: proxy.password,
+    server: server,
+    username: username,
+    password: password,
   };
+
+  console.log(`[Proxy] Запуск браузера с прокси: ${server}`);
 
   const browser = await chromium.launch({
     headless: true,
