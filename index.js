@@ -168,16 +168,35 @@ bot.catch((err, ctx) => {
 
 bot.start((ctx) => {
   ctx.reply(
-    `🤖 *Бот серфинга в Яндексе (Anti-Capcha v3 - Optimized)*\n\n` +
+    `🤖 *Бот серфинга в Яндексе (Proxy-Only Mode)*\n\n` +
     `• Отправьте текст фразы или используйте /setquery N\n` +
     `• /run — старт, /stop_run — стоп\n` +
-    `• Управление IP: /changeip\n` +
+    `• Управление IP: /changeip, /testproxy\n` +
     `• Текущая фраза: ${currentQuery || '—'}`,
     { parse_mode: 'Markdown' }
   );
 });
 
 bot.command('changeip', async (ctx) => { await changeProxyIP(ctx); });
+
+bot.command('testproxy', async (ctx) => {
+  await ctx.reply('🧪 Проверяю прокси...');
+  if (!PROXIES.length) return ctx.reply('❌ Прокси не заданы.');
+
+  const proxy = PROXIES[0];
+  
+  try {
+    const proxyUrlWithAuth = proxy.username && proxy.password 
+      ? `http://${proxy.username}:${proxy.password}@${proxy.server.replace('http://', '')}`
+      : proxy.server;
+    const agent = new HttpsProxyAgent(proxyUrlWithAuth);
+    const res = await fetch('https://api.ipify.org?format=json', { agent, timeout: 10000 });
+    const data = await res.json();
+    await ctx.reply(`✅ Прокси работает!\n📍 IP: ${data.ip}`);
+  } catch (e) {
+    await ctx.reply(`❌ Ошибка прокси: ${e.message}`);
+  }
+});
 
 bot.command('queries', (ctx) => {
   ctx.reply(`📝 Фразы:\n\n${DEFAULT_QUERIES.map((q, i) => `${i + 1}. ${q}`).join('\n')}`);
@@ -247,7 +266,7 @@ async function runSurf(query, stopSet, ctx) {
 
     const proxy = randomProxy(lastProxy);
     lastProxy = proxy?.server || null;
-    const tag = proxy ? proxy.server.split('://')[1]?.split(':')[0] : 'direct';
+    const tag = proxy ? proxy.server.split('://')[1]?.split(':')[0] : 'proxy';
 
     let session;
     try {
@@ -274,11 +293,8 @@ async function runSurf(query, stopSet, ctx) {
 }
 
 // ============================================================================
-// ОПТИМИЗАЦИЯ ТРАФИКА:
-// - Блокируем загрузку изображений и видео
-// - Отключаем CSS и медиа
-// - Загружаем только HTML текст
-// - Сокращаем потребление в 10+ раз!
+// ПОИСК ТОЛЬКО С ПРОКСИ (без fallback на прямое соединение)
+// Если прокси не работает - возвращаем ошибку
 // ============================================================================
 async function searchYandexMobilePlaywright(query, proxy, ctx) {
   let session;
@@ -286,31 +302,29 @@ async function searchYandexMobilePlaywright(query, proxy, ctx) {
     session = await launchSession(proxy);
     const page = session.page;
     
-    // ⚡ ОПТИМИЗАЦИЯ: Блокируем ненужные ресурсы
+    // Блокируем загрузку ненужных ресурсов
     await page.route('**/*.{png,jpg,jpeg,gif,svg,webp,mp4,webm,mov}', route => route.abort());
     await page.route('**/*.css', route => route.abort());
     await page.route('**/analytics/**', route => route.abort());
     await page.route('**/ads/**', route => route.abort());
     
-    console.log('[Yandex] Прогрев сессии на главной...');
+    console.log(`[Yandex] Поиск с прокси: ${proxy?.server || 'unknown'}...`);
+    
     await page.goto('https://m.yandex.ru/', { 
       waitUntil: 'domcontentloaded', 
-      timeout: 30000 
+      timeout: 20000 
     });
     
-    await sleep(2000 + Math.random() * 3000);
+    await sleep(2000 + Math.random() * 2000);
 
-    console.log(`[Yandex] Выполняю поиск: "${query}"`);
     const searchUrl = `https://m.yandex.ru/search/?text=${encodeURIComponent(query)}`;
-    
     await page.goto(searchUrl, { 
       waitUntil: 'domcontentloaded', 
-      timeout: 30000 
+      timeout: 20000 
     });
 
-    await sleep(1500 + Math.random() * 1500);
+    await sleep(1000 + Math.random() * 1000);
 
-    // Проверяем капчу
     const pageText = await page.content().catch(() => '');
     
     if (pageText.includes('smartcaptcha') || pageText.includes('Captcha') || pageText.includes('подтвердите')) {
@@ -318,7 +332,6 @@ async function searchYandexMobilePlaywright(query, proxy, ctx) {
       throw new Error('SmartCaptcha detected');
     }
 
-    // Парсим результаты
     const html = await page.content();
     const $ = cheerio.load(html);
     const items = [];
@@ -343,9 +356,10 @@ async function searchYandexMobilePlaywright(query, proxy, ctx) {
     return items.slice(0, 10);
 
   } catch (err) {
-    console.error('[searchYandexMobilePlaywright]', err.message);
+    console.error('[searchYandex]', err.message);
+    
     if (ctx && ctx.reply) {
-      await ctx.reply(`⚠️ Ошибка поиска: ${err.message.slice(0, 100)}`).catch(() => {});
+      await ctx.reply(`❌ Ошибка поиска: ${err.message.slice(0, 100)}`).catch(() => {});
     }
     throw err;
   } finally {
@@ -356,11 +370,15 @@ async function searchYandexMobilePlaywright(query, proxy, ctx) {
 }
 
 async function launchSession(proxy) {
-  const proxyConfig = proxy ? {
+  if (!proxy) {
+    throw new Error('Прокси требуется! Используйте /testproxy для проверки.');
+  }
+
+  const proxyConfig = {
     server: proxy.server,
     username: proxy.username,
     password: proxy.password,
-  } : undefined;
+  };
 
   const browser = await chromium.launch({
     headless: true,
@@ -372,7 +390,7 @@ async function launchSession(proxy) {
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
       '--disable-web-resources',
-      '--blink-settings=imagesEnabled=false', // 📸 Отключаем изображения
+      '--blink-settings=imagesEnabled=false',
     ],
   });
 
@@ -405,7 +423,6 @@ async function launchSession(proxy) {
 }
 
 async function visitSite(page, url) {
-  // ⚡ Блокируем медиа для посещений сайтов
   await page.route('**/*.{png,jpg,jpeg,gif,svg,webp,mp4,webm,mov,avi,flv}', route => route.abort());
   
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -425,7 +442,7 @@ async function visitSite(page, url) {
   return 'просмотр';
 }
 
-bot.launch().then(() => console.log('✅ Бот запущен (Anti-Capcha v3 - Optimized Bandwidth)'));
+bot.launch().then(() => console.log('✅ Бот запущен (Proxy-Only Mode - Traffic Optimized)'));
 
 process.once('SIGINT', () => { stopScheduler(); bot.stop('SIGINT'); });
 process.once('SIGTERM', () => { stopScheduler(); bot.stop('SIGTERM'); });
