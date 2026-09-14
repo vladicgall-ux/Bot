@@ -169,44 +169,15 @@ bot.catch((err, ctx) => {
 bot.start((ctx) => {
   ctx.reply(
     `🤖 *Бот серфинга в Яндексе (Mobile Anti-Capcha)*\n\n` +
-    `• Текст = фраза, /run — старт, /stop_run — стоп.\n` +
+    `• Отправьте текст фразы или используйте /setquery N\n` +
+    `• /run — старт, /stop_run — стоп\n` +
     `• Управление IP: /changeip\n` +
-    `• Фраза: ${currentQuery || '—'}`,
+    `• Текущая фраза: ${currentQuery || '—'}`,
     { parse_mode: 'Markdown' }
   );
 });
 
 bot.command('changeip', async (ctx) => { await changeProxyIP(ctx); });
-
-bot.command('testproxy', async (ctx) => {
-  await ctx.reply('🧪 Проверяю мобильный прокси и m.yandex.ru...');
-  if (!PROXIES.length) return ctx.reply('❌ Прокси не заданы.');
-
-  const proxy = PROXIES[0];
-  let proxyUrlWithAuth = proxy.server;
-  if (proxy.username && proxy.password) {
-    const urlObj = new URL(proxy.server);
-    urlObj.username = proxy.username;
-    urlObj.password = proxy.password;
-    proxyUrlWithAuth = urlObj.toString();
-  }
-  const customAgent = new HttpsProxyAgent(proxyUrlWithAuth);
-
-  const t0 = Date.now();
-  try {
-    const res = await fetch('https://m.yandex.ru/', {
-      agent: customAgent,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-        'Accept-Language': 'ru-RU,ru;q=0.9',
-      },
-      timeout: 25000,
-    });
-    await ctx.reply(`✅ m.yandex.ru — статус ${res.status} (${Date.now() - t0}ms)`);
-  } catch (err) {
-    await ctx.reply(`❌ Ошибка: ${err.message.slice(0, 80)}`);
-  }
-});
 
 bot.command('queries', (ctx) => {
   ctx.reply(`📝 Фразы:\n\n${DEFAULT_QUERIES.map((q, i) => `${i + 1}. ${q}`).join('\n')}`);
@@ -214,14 +185,14 @@ bot.command('queries', (ctx) => {
 
 bot.command('setquery', (ctx) => {
   const n = parseInt(ctx.message.text.replace('/setquery', '').trim(), 10);
-  if (!n || n < 1 || n > DEFAULT_QUERIES.length) return ctx.reply(`1–${DEFAULT_QUERIES.length}`);
+  if (!n || n < 1 || n > DEFAULT_QUERIES.length) return ctx.reply(`Укажите номер от 1 до ${DEFAULT_QUERIES.length}`);
   currentQuery = DEFAULT_QUERIES[n - 1];
-  ctx.reply(`✅ «${currentQuery}»`);
+  ctx.reply(`✅ Выбрана фраза #${n}: «${currentQuery}»`);
 });
 
 bot.command('run', async (ctx) => {
   if (isRunning) return ctx.reply('⚠️ Уже выполняется.');
-  if (!currentQuery) return ctx.reply('❌ Фраза не задана.');
+  if (!currentQuery) return ctx.reply('❌ Фраза не задана. Сначала выберите фразу через /setquery N или отправьте текст.');
   isRunning = true;
   await ctx.reply(`🚀 Запуск для: «${currentQuery}»`);
   try {
@@ -301,7 +272,7 @@ async function runSurf(query, stopSet, ctx) {
   ].join('\n');
 }
 
-// ─── Продвинутый поиск через мобильный m.yandex.ru с прогревом кук ──────────
+// Поиск через мобильный m.yandex.ru с прогревом кук и задержками
 async function searchYandexMobileHttp(query, proxy, ctx) {
   let proxyUrlWithAuth = proxy.server;
   if (proxy.username && proxy.password) {
@@ -312,22 +283,21 @@ async function searchYandexMobileHttp(query, proxy, ctx) {
   }
   const agent = new HttpsProxyAgent(proxyUrlWithAuth);
 
-  // Пул мобильных юзерагентов для рандомизации
   const mobileUAs = [
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-    'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/23.0 Chrome/115.0.0.0 Mobile Safari/537.36'
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
   ];
   const selectedUA = mobileUAs[Math.floor(Math.random() * mobileUAs.length)];
 
   const headers = {
     'User-Agent': selectedUA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8',
-    'Referer': 'https://m.yandex.ru/'
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
   };
 
-  // Шаг 1: Прогрев (заходим на главную m.yandex.ru, чтобы собрать куки сессии)
+  // Шаг 1: Заходим на главную m.yandex.ru для получения кук
   let cookies = '';
   try {
     const homeRes = await fetch('https://m.yandex.ru/', { agent, headers, timeout: 15000 });
@@ -336,14 +306,18 @@ async function searchYandexMobileHttp(query, proxy, ctx) {
       cookies = setCookieHeader.map(c => c.split(';')[0]).join('; ');
     }
   } catch (e) {
-    console.warn('[Warmup] Ошибка прогрева главной:', e.message);
+    console.warn('[Warmup] Ошибка:', e.message);
   }
 
-  await sleep(1000 + Math.random() * 1000);
+  // Человеческая пауза на чтение главной (3-6 секунд)
+  await sleep(3000 + Math.random() * 3000);
 
-  // Шаг 2: Сам поисковый запрос на m.yandex.ru
+  // Шаг 2: Поисковый запрос
   const searchUrl = `https://m.yandex.ru/search/?text=${encodeURIComponent(query)}`;
-  const searchHeaders = { ...headers };
+  const searchHeaders = { 
+    ...headers, 
+    'Referer': 'https://m.yandex.ru/' 
+  };
   if (cookies) searchHeaders['Cookie'] = cookies;
 
   const response = await fetch(searchUrl, {
@@ -362,7 +336,6 @@ async function searchYandexMobileHttp(query, proxy, ctx) {
   const $ = cheerio.load(html);
   const items = [];
 
-  // Селекторы мобильной выдачи Яндекса
   $('div.serp-item, .card, article, div[data-fast-name]').each((_, node) => {
     const link = $(node).find('a[href^="http"]').first();
     const href = link.attr('href');
