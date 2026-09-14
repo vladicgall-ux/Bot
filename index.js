@@ -15,32 +15,8 @@ if (!BOT_TOKEN) {
 
 const PROXY_ROTATE_URL = process.env.PROXY_ROTATE_URL || 'https://api.lteboost.com/rotate?key=ltb_ssjgP4Ie9hTF2Ow1UO_bua_xryrF7Zrorf1WpfDH0Eg';
 
-// Читаем переменные прокси из окружения
-const PROXY_SERVER = process.env.PROXY_SERVER;
-const PROXY_USER = process.env.PROXY_USER;
-const PROXY_PASS = process.env.PROXY_PASS;
-
-function getProxyFromEnv() {
-  if (PROXY_SERVER && PROXY_USER && PROXY_PASS) {
-    return {
-      server: PROXY_SERVER,
-      username: PROXY_USER,
-      password: PROXY_PASS,
-    };
-  }
-  return null;
-}
-
 function parseProxyList() {
   const list = [];
-  
-  // Сначала проверяем переменные окружения PROXY_SERVER, PROXY_USER, PROXY_PASS
-  const envProxy = getProxyFromEnv();
-  if (envProxy) {
-    list.push(envProxy);
-  }
-  
-  // Потом проверяем PROXY_LIST (старый формат)
   if (process.env.PROXY_LIST) {
     const lines = process.env.PROXY_LIST.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
     for (const line of lines) {
@@ -61,7 +37,6 @@ function parseProxyList() {
     }
   }
   
-  // Если ничего не найдено, используем дефолтный прокси
   if (!list.length) {
     list.push({
       server: 'http://mob.lteboost.com:3000',
@@ -74,7 +49,6 @@ function parseProxyList() {
 
 const PROXIES = parseProxyList();
 console.log(`[init] Прокси: ${PROXIES.length}`);
-console.log(`[init] PROXY_SERVER из .env: ${PROXY_SERVER || 'не установлен'}`);
 
 function randomProxy(exclude = null) {
   if (!PROXIES.length) return null;
@@ -194,11 +168,10 @@ bot.catch((err, ctx) => {
 
 bot.start((ctx) => {
   ctx.reply(
-    `🤖 *Бот серфинга в Яндексе (Proxy-Only Mode)*\n\n` +
-    `• Отправьте текст фразы или используйте /setquery N\n` +
-    `• /run — старт, /stop_run — стоп\n` +
-    `• Управление IP: /changeip, /testproxy\n` +
-    `• Текущая фраза: ${currentQuery || '—'}`,
+    `🤖 *Бот серфинга в Яндексе (Mobile Anti-Capcha)*\n\n` +
+    `• Текст = фраза, /run — старт, /stop_run — стоп.\n` +
+    `• Управление IP: /changeip\n` +
+    `• Фраза: ${currentQuery || '—'}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -206,25 +179,32 @@ bot.start((ctx) => {
 bot.command('changeip', async (ctx) => { await changeProxyIP(ctx); });
 
 bot.command('testproxy', async (ctx) => {
-  await ctx.reply('🧪 Проверяю прокси...');
+  await ctx.reply('🧪 Проверяю мобильный прокси и m.yandex.ru...');
   if (!PROXIES.length) return ctx.reply('❌ Прокси не заданы.');
 
   const proxy = PROXIES[0];
-  
+  let proxyUrlWithAuth = proxy.server;
+  if (proxy.username && proxy.password) {
+    const urlObj = new URL(proxy.server);
+    urlObj.username = proxy.username;
+    urlObj.password = proxy.password;
+    proxyUrlWithAuth = urlObj.toString();
+  }
+  const customAgent = new HttpsProxyAgent(proxyUrlWithAuth);
+
+  const t0 = Date.now();
   try {
-    // Формируем URL прокси
-    let proxyUrl = proxy.server;
-    if (proxy.username && proxy.password) {
-      const urlObj = new URL(proxy.server);
-      proxyUrl = `http://${proxy.username}:${proxy.password}@${urlObj.hostname}:${urlObj.port || 80}`;
-    }
-    
-    const agent = new HttpsProxyAgent(proxyUrl);
-    const res = await fetch('https://api.ipify.org?format=json', { agent, timeout: 10000 });
-    const data = await res.json();
-    await ctx.reply(`✅ Прокси работает!\n📍 IP: ${data.ip}\n🔗 Сервер: ${proxy.server}`);
-  } catch (e) {
-    await ctx.reply(`❌ Ошибка прокси: ${e.message}\n🔗 Сервер: ${proxy.server}`);
+    const res = await fetch('https://m.yandex.ru/', {
+      agent: customAgent,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        'Accept-Language': 'ru-RU,ru;q=0.9',
+      },
+      timeout: 25000,
+    });
+    await ctx.reply(`✅ m.yandex.ru — статус ${res.status} (${Date.now() - t0}ms)`);
+  } catch (err) {
+    await ctx.reply(`❌ Ошибка: ${err.message.slice(0, 80)}`);
   }
 });
 
@@ -234,14 +214,14 @@ bot.command('queries', (ctx) => {
 
 bot.command('setquery', (ctx) => {
   const n = parseInt(ctx.message.text.replace('/setquery', '').trim(), 10);
-  if (!n || n < 1 || n > DEFAULT_QUERIES.length) return ctx.reply(`Укажите номер от 1 до ${DEFAULT_QUERIES.length}`);
+  if (!n || n < 1 || n > DEFAULT_QUERIES.length) return ctx.reply(`1–${DEFAULT_QUERIES.length}`);
   currentQuery = DEFAULT_QUERIES[n - 1];
-  ctx.reply(`✅ Выбрана фраза #${n}: «${currentQuery}»`);
+  ctx.reply(`✅ «${currentQuery}»`);
 });
 
 bot.command('run', async (ctx) => {
   if (isRunning) return ctx.reply('⚠️ Уже выполняется.');
-  if (!currentQuery) return ctx.reply('❌ Фраза не задана. Сначала выберите фразу через /setquery N или отправьте текст.');
+  if (!currentQuery) return ctx.reply('❌ Фраза не задана.');
   isRunning = true;
   await ctx.reply(`🚀 Запуск для: «${currentQuery}»`);
   try {
@@ -270,9 +250,8 @@ async function runSurf(query, stopSet, ctx) {
   
   let results = [];
   try {
-    results = await searchYandexMobilePlaywright(query, searchProxy, ctx);
+    results = await searchYandexMobileHttp(query, searchProxy, ctx);
   } catch (err) {
-    console.error('[runSurf] Search error:', err.message);
     await changeProxyIP();
     throw err;
   }
@@ -296,7 +275,7 @@ async function runSurf(query, stopSet, ctx) {
 
     const proxy = randomProxy(lastProxy);
     lastProxy = proxy?.server || null;
-    const tag = proxy ? proxy.server.split('://')[1]?.split(':')[0] : 'proxy';
+    const tag = proxy ? proxy.server.split('://')[1]?.split(':')[0] : 'direct';
 
     let session;
     try {
@@ -322,113 +301,87 @@ async function runSurf(query, stopSet, ctx) {
   ].join('\n');
 }
 
-// ============================================================================
-// ПОИСК ТОЛЬКО С ПРОКСИ
-// Поддерживает переменные окружения: PROXY_SERVER, PROXY_USER, PROXY_PASS
-// ============================================================================
-async function searchYandexMobilePlaywright(query, proxy, ctx) {
-  let session;
-  try {
-    session = await launchSession(proxy);
-    const page = session.page;
-    
-    // Блокируем загрузку ненужных ресурсов
-    await page.route('**/*.{png,jpg,jpeg,gif,svg,webp,mp4,webm,mov}', route => route.abort());
-    await page.route('**/*.css', route => route.abort());
-    await page.route('**/analytics/**', route => route.abort());
-    await page.route('**/ads/**', route => route.abort());
-    
-    console.log(`[Yandex] Поиск с прокси: ${proxy?.server || 'unknown'}...`);
-    
-    await page.goto('https://m.yandex.ru/', { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 20000 
-    });
-    
-    await sleep(2000 + Math.random() * 2000);
-
-    const searchUrl = `https://m.yandex.ru/search/?text=${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 20000 
-    });
-
-    await sleep(1000 + Math.random() * 1000);
-
-    const pageText = await page.content().catch(() => '');
-    
-    if (pageText.includes('smartcaptcha') || pageText.includes('Captcha') || pageText.includes('подтвердите')) {
-      if (ctx && ctx.reply) await ctx.reply('🛑 Яндекс затребовал SmartCaptcha. Меняю IP...');
-      throw new Error('SmartCaptcha detected');
-    }
-
-    const html = await page.content();
-    const $ = cheerio.load(html);
-    const items = [];
-
-    $('a[href^="http"]').each((_, el) => {
-      const href = $(el).attr('href');
-      const title = $(el).text().trim();
-      
-      if (href && 
-          !href.includes('yandex.ru') && 
-          !href.includes('ya.ru') &&
-          !href.includes('turbo.yandex') &&
-          !href.includes('ads.') &&
-          href.startsWith('http')) {
-        if (!items.some(i => i.url === href)) {
-          items.push({ url: href, title: title || href });
-        }
-      }
-    });
-
-    console.log(`[Yandex] Найдено результатов: ${items.length}`);
-    return items.slice(0, 10);
-
-  } catch (err) {
-    console.error('[searchYandex]', err.message);
-    
-    if (ctx && ctx.reply) {
-      await ctx.reply(`❌ Ошибка поиска: ${err.message.slice(0, 100)}`).catch(() => {});
-    }
-    throw err;
-  } finally {
-    if (session?.browser) {
-      await session.browser.close().catch(() => {});
-    }
+// ─── Продвинутый поиск через мобильный m.yandex.ru с прогревом кук ──────────
+async function searchYandexMobileHttp(query, proxy, ctx) {
+  let proxyUrlWithAuth = proxy.server;
+  if (proxy.username && proxy.password) {
+    const urlObj = new URL(proxy.server);
+    urlObj.username = proxy.username;
+    urlObj.password = proxy.password;
+    proxyUrlWithAuth = urlObj.toString();
   }
+  const agent = new HttpsProxyAgent(proxyUrlWithAuth);
+
+  // Пул мобильных юзерагентов для рандомизации
+  const mobileUAs = [
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/23.0 Chrome/115.0.0.0 Mobile Safari/537.36'
+  ];
+  const selectedUA = mobileUAs[Math.floor(Math.random() * mobileUAs.length)];
+
+  const headers = {
+    'User-Agent': selectedUA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8',
+    'Referer': 'https://m.yandex.ru/'
+  };
+
+  // Шаг 1: Прогрев (заходим на главную m.yandex.ru, чтобы собрать куки сессии)
+  let cookies = '';
+  try {
+    const homeRes = await fetch('https://m.yandex.ru/', { agent, headers, timeout: 15000 });
+    const setCookieHeader = homeRes.headers.raw()['set-cookie'];
+    if (setCookieHeader) {
+      cookies = setCookieHeader.map(c => c.split(';')[0]).join('; ');
+    }
+  } catch (e) {
+    console.warn('[Warmup] Ошибка прогрева главной:', e.message);
+  }
+
+  await sleep(1000 + Math.random() * 1000);
+
+  // Шаг 2: Сам поисковый запрос на m.yandex.ru
+  const searchUrl = `https://m.yandex.ru/search/?text=${encodeURIComponent(query)}`;
+  const searchHeaders = { ...headers };
+  if (cookies) searchHeaders['Cookie'] = cookies;
+
+  const response = await fetch(searchUrl, {
+    agent: agent,
+    headers: searchHeaders,
+    timeout: 30000,
+  });
+
+  const html = await response.text();
+
+  if (html.includes('Captcha') || html.includes('подтвердите') || html.includes('smartcaptcha')) {
+    if (ctx && ctx.reply) await ctx.reply('🛑 Мобильный Яндекс затребовал капчу.');
+    throw new Error('Captcha detected');
+  }
+
+  const $ = cheerio.load(html);
+  const items = [];
+
+  // Селекторы мобильной выдачи Яндекса
+  $('div.serp-item, .card, article, div[data-fast-name]').each((_, node) => {
+    const link = $(node).find('a[href^="http"]').first();
+    const href = link.attr('href');
+    const title = $(node).find('h2, .organic__title, .Path').text().trim();
+
+    if (href && !href.includes('yandex.ru') && !href.includes('ya.ru') && href.startsWith('http')) {
+      items.push({ url: href, title: title || href });
+    }
+  });
+
+  const seen = new Set();
+  return items.filter((i) => !seen.has(i.url) && seen.add(i.url)).slice(0, 10);
 }
 
 async function launchSession(proxy) {
-  if (!proxy) {
-    throw new Error('Прокси требуется! Используйте /testproxy для проверки.');
-  }
-
-  // Используем переменные окружения PROXY_SERVER, PROXY_USER, PROXY_PASS если они установлены
-  const server = PROXY_SERVER || proxy.server;
-  const username = PROXY_USER || proxy.username;
-  const password = PROXY_PASS || proxy.password;
-
-  const proxyConfig = {
-    server: server,
-    username: username,
-    password: password,
-  };
-
-  console.log(`[Proxy] Запуск браузера с прокси: ${server}`);
-
   const browser = await chromium.launch({
     headless: true,
-    proxy: proxyConfig,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-web-resources',
-      '--blink-settings=imagesEnabled=false',
-    ],
+    proxy: proxy || undefined,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
   });
 
   const device = devices['Pixel 7'];
@@ -436,33 +389,14 @@ async function launchSession(proxy) {
     ...device,
     locale: 'ru-RU',
     timezoneId: 'Asia/Yekaterinburg',
-    bypassCSP: true,
-    ignoreHTTPSErrors: true,
-  });
-
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => false,
-    });
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [1, 2, 3, 4, 5],
-    });
   });
 
   const page = await context.newPage();
-  
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-  });
-
   return { browser, context, page };
 }
 
 async function visitSite(page, url) {
-  await page.route('**/*.{png,jpg,jpeg,gif,svg,webp,mp4,webm,mov,avi,flv}', route => route.abort());
-  
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await sleep(2000 + Math.random() * 1500);
   
   const duration = 8000 + Math.random() * 4000;
@@ -479,7 +413,21 @@ async function visitSite(page, url) {
   return 'просмотр';
 }
 
-bot.launch().then(() => console.log('✅ Бот запущен (Proxy-Only Mode - Traffic Optimized)'));
+// ============================================================================
+// Обработчик неизвестных команд и сообщений для отладки
+// ============================================================================
+bot.use(async (ctx) => {
+  try {
+    console.log(`[Message] From: ${ctx.from.id}, Text: ${ctx.message?.text || ctx.message?.caption || 'N/A'}`);
+    if (ctx.message?.text && ctx.message.text.startsWith('/')) {
+      await ctx.reply('❓ Неизвестная команда.\n\n📋 Доступные команды:\n/run — запуск\n/stop_run — стоп\n/changeip — смена IP\n/testproxy — тест прокси\n/queries — список фраз\n/setquery N — выбрать фразу\n\nОтправь текст для установки фразы.');
+    }
+  } catch (err) {
+    console.error('[Error]', err);
+  }
+});
+
+bot.launch().then(() => console.log('✅ Бот запущен (Mobile Anti-Capcha режим)'));
 
 process.once('SIGINT', () => { stopScheduler(); bot.stop('SIGINT'); });
 process.once('SIGTERM', () => { stopScheduler(); bot.stop('SIGTERM'); });
